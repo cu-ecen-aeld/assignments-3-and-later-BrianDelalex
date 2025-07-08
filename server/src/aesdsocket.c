@@ -3,10 +3,7 @@
 # include <stdio.h>
 # include <stdlib.h>
 # include <string.h>
-# include <sys/socket.h>
-# include <sys/types.h>
 # include <unistd.h>
-# include <fcntl.h>
 
 # include <syslog.h>
 # include <errno.h>
@@ -17,20 +14,48 @@
 # include <sys/wait.h>
 # include <signal.h>
 
+# include "file_io.h"
+# include "thread_list.h"
+# include "network.h"
+
 int server = -1;
-int client = -1;
 int fd = -1;
+pthread_mutex_t fd_mutex;
+head_t head;
+pthread_t timestamp_thread;
 
 void signal_handler(int sig)
 {
     syslog(LOG_INFO, "Caught signal, exiting");
-    //if (fd != -1)
-        //close(fd);
-    if (client != -1)
-        close(client);
+    struct thread_node_s *data;
+    struct thread_node_s *temp = NULL;
+threads_cleanup:
+    SLIST_FOREACH(data, &head, entries) {
+        if (data->done != 1) {
+            pthread_kill(data->id, SIGABRT);
+        }
+        pthread_join(data->id, NULL);
+        temp = data;
+        break;
+    }
+    if (temp) {
+        SLIST_REMOVE(&head, temp, thread_node_s, entries);
+        free(temp);
+        temp = NULL;
+        goto threads_cleanup;
+    }
+    pthread_kill(timestamp_thread, SIGABRT);
+    pthread_join(timestamp_thread, NULL);
+    if (fd != -1)
+        close(fd);
     if (server != -1)
         close(server);
     unlink("/var/tmp/aesdsocketdata");
+}
+
+void thread_signal_handler(int sig)
+{
+    pthread_exit(NULL);
 }
 
 int open_socket()
@@ -69,109 +94,103 @@ int open_socket()
     return fd;
 }
 
-int listen_and_accept_con(int fd, char *addr)
+void *timestamp_routine(void *threadData)
 {
-    struct sockaddr clientAddr;
-    socklen_t clientAddrLen;
-    int rc = listen(fd, 1);
-    if (rc != 0) {
-        printf("%s\n", strerror(errno));
-        return -1;
-    }
-    int client = accept(fd, &clientAddr, &clientAddrLen);
-    if (client == -1) {
-        printf("%s\n", strerror(errno));
-        return -1;
-    }
-    memcpy(addr, clientAddr.sa_data, 14);
-    syslog(LOG_INFO, "Accepted connection from %s", clientAddr.sa_data);
-    return client;
-}
+    struct sigaction action;
 
-int is_packet_complete(char *buffer, int size)
-{
-    for (int i = 0; i < size; i++)
-        if (buffer[i] == '\n')
-            return 1;
-    return 0;
-}
-
-
-
-char *receive_data(int client)
-{
-    int bufferLength = 1024;
-    ssize_t totalReadedByte = 0;
-    char *buffer = malloc(sizeof(char) * bufferLength);
-
-    if (!buffer) {
-        printf("Out of memory!");
+    memset(&action, 0, sizeof(struct sigaction));
+    action.sa_handler = thread_signal_handler;
+    if (sigaction(SIGABRT, &action, NULL) != 0) {
+        printf("%s: %s", __FUNCTION__, strerror(errno));
         return NULL;
     }
+    time_t t;
+    struct tm *tmp;
 
-    memset(buffer, 0, bufferLength);
-    ssize_t readedByte = recv(client, buffer, bufferLength, 0);
-    totalReadedByte += readedByte;
-    int i = 0;
-    while (readedByte != 0) {
-        if (is_packet_complete(buffer, totalReadedByte) == 1)
-            break;
-
-        bufferLength += 1024;
-        buffer = realloc(buffer, sizeof(char) * bufferLength);
-        if (buffer == NULL) {
-            printf("Out of memory!");
-            return NULL;
+    while (1) {
+        char buffer[1024];
+        t = time(NULL);
+        tmp = localtime(&t);
+        int rc = strftime(buffer, 1024, "timestamp:%a, %d %b %Y %T %z\n", tmp);
+        if (rc != 0) {
+            pthread_mutex_lock(&fd_mutex);
+            if (write(fd, buffer, rc) == -1) {
+                printf("%s: %s", __FUNCTION__, strerror(errno));
+            }
+            pthread_mutex_unlock(&fd_mutex);
         }
-        memset(&(buffer[totalReadedByte]), 0, 1024);
-        readedByte = recv(client, &(buffer[totalReadedByte]), 1024, 0);
-        totalReadedByte += readedByte;
-        i++;
+        sleep(10);
     }
-    return buffer;
 }
 
-int open_file()
+void *connection_routine(void *threadData)
 {
-    int fd = open("/var/tmp/aesdsocketdata", O_CREAT | O_RDWR | O_APPEND, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-    return fd;
-}
+    struct sigaction action;
 
-char *read_file(int fd)
-{
-    char *data = NULL;
-
-    off_t fileSize = lseek(fd, 0, SEEK_END);
-    if (fileSize == -1) {
-        printf("%s", strerror(errno));
+    memset(&action, 0, sizeof(struct sigaction));
+    action.sa_handler = thread_signal_handler;
+    if (sigaction(SIGABRT, &action, NULL) != 0) {
+        printf("%s: %s", __FUNCTION__, strerror(errno));
         return NULL;
     }
+    char *data;
+    char *fileData;
+    struct thread_node_s* threadInfo = (struct thread_node_s*) threadData;
 
-    off_t offset = lseek(fd, 0, SEEK_SET);
-    if (offset != 0) {
-        printf("%s", strerror(errno));
-        return NULL;
-    }
-    data = malloc(sizeof(char) * fileSize + 1);
+    data = receive_data(threadInfo->client_fd);
     if (!data) {
-        printf("Out of memory!");
-        return NULL;
+        printf("%s: error in receive_data().\n", __FUNCTION__);
+        goto close_client;
     }
-    if (read(fd, data, fileSize) == -1) {
-        printf("%s", strerror(errno));
-        free(data);
-        return NULL;
-    }
-    data[fileSize] = 0;
 
-    return data;
+    pthread_mutex_lock(&fd_mutex);
+    if (write(fd, data, strlen(data)) == -1) {
+        pthread_mutex_unlock(&fd_mutex);
+        printf("%s: %s", __FUNCTION__, strerror(errno));
+        goto free_data;
+    }
+    pthread_mutex_unlock(&fd_mutex);
+    free(data);
+
+    pthread_mutex_lock(&fd_mutex);
+    fileData = read_file(fd);
+    pthread_mutex_unlock(&fd_mutex);
+    if (!fileData) {
+        printf("%s: error in read_file().\n", __FUNCTION__);
+        goto free_data;
+    }
+
+    if (send(threadInfo->client_fd, fileData, strlen(fileData), 0) == -1) {
+        printf("%s: %s", __FUNCTION__, strerror(errno));
+        goto free_fileData;
+    }
+    free(fileData);
+    
+
+    char buff[1024];
+    int readByte = recv(threadInfo->client_fd, buff, 1024, 0);
+    while (readByte != 0 && readByte != -1) {
+        readByte = recv(threadInfo->client_fd, buff, 1024, 0);
+    }
+
+    syslog(LOG_INFO, "Closed connection from %s", threadInfo->addr);
+    close(threadInfo->client_fd);
+    threadInfo->done = 1;
+    return NULL;
+
+free_fileData:
+    free(fileData);
+free_data:
+    free(data);
+close_client:
+    close(threadInfo->client_fd);
+    threadInfo->done = 1;
+    return NULL;
 }
 
 int main(int ac, char **av)
 {
     struct sigaction action;
-    char *data;
-    char *fileData;
 
     memset(&action, 0, sizeof(struct sigaction));
     action.sa_handler = signal_handler;
@@ -184,12 +203,17 @@ int main(int ac, char **av)
         return -1;
     }
 
+    fd = open_file();
+    if (fd == -1) {
+        printf("%s: %s", __FUNCTION__, strerror(errno));
+        return -1;
+    }
 
     openlog(NULL, 0, LOG_USER);
     server = open_socket();
     if (server == -1) {
         printf("%s: error in open_socket().\n", __FUNCTION__);
-        return -1;
+        goto close_file;
     }
 
     if (ac == 2 && strcmp(av[1], "-d") == 0) {
@@ -200,61 +224,60 @@ int main(int ac, char **av)
         }
     }
 
+    pthread_mutex_init(&fd_mutex, NULL);
+
+    int rc = pthread_create(&timestamp_thread, NULL, timestamp_routine, NULL);
+    if (rc != 0) {
+        close(fd);
+        printf("%s(l.%d): Error in pthread_create with code %d", __FUNCTION__, __LINE__, rc);
+        return -1;
+    }
+
+    SLIST_INIT(&head);
+
     while (1) {
+        struct thread_node_s *data;
+        struct thread_node_s *temp = NULL;
+join_threads:
+        SLIST_FOREACH(data, &head, entries) {
+            if (data->done == 1) {
+                temp = data;
+                break;
+            }
+        }
+        if (temp) {
+            pthread_join(temp->id, NULL);
+            SLIST_REMOVE(&head, temp, thread_node_s, entries);
+            free(temp);
+            temp = NULL;
+            goto join_threads;
+        }
         char addr[15];
         memset(addr, 0, 15);
-        client = listen_and_accept_con(server, addr);
-        if (client == -1) {
+
+        int client_fd = listen_and_accept_con(server, addr);
+        if (client_fd == -1) {
             printf("%s: error in listen_and_accept_con().\n", __FUNCTION__);
-            goto close_socket;
+            goto exit;
         }
-
-        data = receive_data(client);
-        if (!data) {
-            printf("%s: error in receive_data().\n", __FUNCTION__);
-            goto close_client;
+        struct thread_node_s *threadInfo = malloc(sizeof(struct thread_node_s)); 
+        threadInfo->done = 0;
+        threadInfo->client_fd = client_fd;
+        memcpy(threadInfo->addr, addr, 14);
+        rc = pthread_create(
+            &(threadInfo->id), NULL, connection_routine, (void*)threadInfo);
+        if (rc != 0) {
+            printf("%s(l.%d): Error in pthread_create with code %d", __FUNCTION__, __LINE__, rc);
+            goto exit;
         }
-
-        fd = open_file();
-        if (fd == -1) {
-            printf("%s: %s", __FUNCTION__, strerror(errno));
-            goto free_data;
-        }
-
-        if (write(fd, data, strlen(data)) == -1) {
-            printf("%s: %s", __FUNCTION__, strerror(errno));
-            goto close_file;
-        }
-
-        fileData = read_file(fd);
-        if (!fileData) {
-            printf("%s: error in read_file().\n", __FUNCTION__);
-            goto close_file;
-        }
-
-        if (send(client, fileData, strlen(fileData), 0) == -1) {
-            printf("%s: %s", __FUNCTION__, strerror(errno));
-            goto free_fileData;
-        }
-
-        syslog(LOG_INFO, "Closed connection from %s", addr);
-        free(fileData);
-        close(fd);
-        free(data);
-        close(client);
+        SLIST_INSERT_HEAD(&head, threadInfo, entries);
     }
     close(server);
+    close(fd);
     return 0;
-
-free_fileData:
-    free(fileData);
+exit:
+    close(server);
 close_file:
     close(fd);
-free_data:
-    free(data);
-close_client:
-    close(client);
-close_socket:
-    close(server);
     return -1;
 }

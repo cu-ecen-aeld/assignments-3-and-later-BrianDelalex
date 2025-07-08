@@ -1,15 +1,17 @@
-CC = $(CROSS_COMPILE)gcc
+CC ?= $(CROSS_COMPILE)gcc
 
 RM := rm -f
 
 BIN := aesdsocket
 
-INCLUDES := ./inc
+INCLUDES ?= ./inc
 
-CFLAGS += -g -Wall -Werror
+CFLAGS ?= -I $(INCLUDES) -g -Wall -Werror
 
-SRC := ./src/aesdsocket.c
-OBJ := ./src/aesdsocket.o
+LDFLAGS ?= -lpthread -lrt
+
+SRC :=	$(wildcard ./src/*.c)
+OBJ := $(patsubst %.c, %.o, $(SRC))
 
 ALL: $(BIN)
 
@@ -20,4 +22,4 @@ clean:
 	@$(RM) $(OBJ) $(BIN)
 
 %o: %c
-	@$(CC) -I$(INCLUDES) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS)
