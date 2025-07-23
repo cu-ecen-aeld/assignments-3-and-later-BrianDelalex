@@ -1,3 +1,5 @@
+# include "file_io.h"
+
 # include <unistd.h>
 # include <fcntl.h>
 # include <stdio.h>
@@ -8,7 +10,7 @@
 
 int open_file()
 {
-    int fd = open("/var/tmp/aesdsocketdata", O_CREAT | O_RDWR | O_APPEND, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+    int fd = open(OUTPUT_PATH, O_CREAT | O_RDWR | O_APPEND, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
     return fd;
 }
 

@@ -19,10 +19,8 @@
 # include "network.h"
 
 int server = -1;
-int fd = -1;
 pthread_mutex_t fd_mutex;
 head_t head;
-pthread_t timestamp_thread;
 
 void signal_handler(int sig)
 {
@@ -44,13 +42,11 @@ threads_cleanup:
         temp = NULL;
         goto threads_cleanup;
     }
-    pthread_kill(timestamp_thread, SIGABRT);
-    pthread_join(timestamp_thread, NULL);
-    if (fd != -1)
-        close(fd);
     if (server != -1)
         close(server);
-    unlink("/var/tmp/aesdsocketdata");
+#ifndef USE_AESD_CHAR_DEVICE
+    unlink(OUTPUT_PATH);
+#endif//!USE_AESD_CHAR_DEVICE
 }
 
 void thread_signal_handler(int sig)
@@ -113,11 +109,17 @@ void *timestamp_routine(void *threadData)
         tmp = localtime(&t);
         int rc = strftime(buffer, 1024, "timestamp:%a, %d %b %Y %T %z\n", tmp);
         if (rc != 0) {
+            int fd = open_file();
+            if (fd == -1) {
+                printf("%s: %s", __FUNCTION__, strerror(errno));
+                continue;
+            }
             pthread_mutex_lock(&fd_mutex);
             if (write(fd, buffer, rc) == -1) {
                 printf("%s: %s", __FUNCTION__, strerror(errno));
             }
             pthread_mutex_unlock(&fd_mutex);
+            close(fd);
         }
         sleep(10);
     }
@@ -143,6 +145,12 @@ void *connection_routine(void *threadData)
         goto close_client;
     }
 
+    int fd = open_file();
+    if (fd == -1) {
+        printf("%s: %s", __FUNCTION__, strerror(errno));
+        return NULL;
+    }
+
     pthread_mutex_lock(&fd_mutex);
     if (write(fd, data, strlen(data)) == -1) {
         pthread_mutex_unlock(&fd_mutex);
@@ -157,6 +165,7 @@ void *connection_routine(void *threadData)
         printf("%s: error in read_file().\n", __FUNCTION__);
         goto free_data;
     }
+    close(fd);
 
     if (send(threadInfo->client_fd, fileData, strlen(fileData), 0) == -1) {
         printf("%s: %s", __FUNCTION__, strerror(errno));
@@ -189,6 +198,7 @@ close_client:
 int main(int ac, char **av)
 {
     struct sigaction action;
+    int rc = 0;
 
     memset(&action, 0, sizeof(struct sigaction));
     action.sa_handler = signal_handler;
@@ -201,17 +211,11 @@ int main(int ac, char **av)
         return -1;
     }
 
-    fd = open_file();
-    if (fd == -1) {
-        printf("%s: %s", __FUNCTION__, strerror(errno));
-        return -1;
-    }
-
     openlog(NULL, 0, LOG_USER);
     server = open_socket();
     if (server == -1) {
         printf("%s: error in open_socket().\n", __FUNCTION__);
-        goto close_file;
+        goto exit;
     }
 
     if (ac == 2 && strcmp(av[1], "-d") == 0) {
@@ -223,13 +227,6 @@ int main(int ac, char **av)
     }
 
     pthread_mutex_init(&fd_mutex, NULL);
-
-    int rc = pthread_create(&timestamp_thread, NULL, timestamp_routine, NULL);
-    if (rc != 0) {
-        close(fd);
-        printf("%s(l.%d): Error in pthread_create with code %d", __FUNCTION__, __LINE__, rc);
-        return -1;
-    }
 
     SLIST_INIT(&head);
 
@@ -271,11 +268,8 @@ join_threads:
         SLIST_INSERT_HEAD(&head, threadInfo, entries);
     }
     close(server);
-    close(fd);
     return 0;
 exit:
     close(server);
-close_file:
-    close(fd);
     return -1;
 }

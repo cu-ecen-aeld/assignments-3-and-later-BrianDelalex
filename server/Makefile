@@ -4,8 +4,7 @@ RM := rm -f
 
 BIN := aesdsocket
 
-CFLAGS = -I./inc
-CFLAGS ?= -g -Wall -Werror
+CFLAGS := $(CFLAGS) -I./inc -g -Wall -Werror
 
 LDFLAGS ?= -lpthread -lrt
 
