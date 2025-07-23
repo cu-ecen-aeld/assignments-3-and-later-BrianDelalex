@@ -71,8 +71,11 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
                 &entry_offset
             );
         if (!entry) {
-            kfree(kbuf);
-            return 0;
+            if (retval == 0) {
+                kfree(kbuf);
+                return 0;
+            }
+            break;
         }
         while (entry_offset < entry->size && retval < count) {
             kbuf[retval] = entry->buffptr[entry_offset];
@@ -80,15 +83,15 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
             retval++;
         }
     }
-    retval = copy_to_user(buf, kbuf, retval);
+    unsigned long byte_copied = copy_to_user(buf, kbuf, retval);
     kfree(kbuf);
-    if (retval != 0) {
-        PDEBUG("%s(l.%d): %ld bytes has not been copied.", __FUNCTION__, __LINE__, retval);
-        return count - retval;
+    if (byte_copied != 0) {
+        PDEBUG("%s(l.%d): %ld bytes has not been copied.\n", __FUNCTION__, __LINE__, byte_copied);
+        return retval - byte_copied;
     }
-    *f_pos = *f_pos + count;
+    *f_pos = *f_pos + retval;
 
-    return count;
+    return retval;
 }
 
 ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
@@ -110,6 +113,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
         to_write[count + pending_count] = 0;
         memcpy(to_write, dev->pending_write, pending_count);
         kfree(dev->pending_write);
+        dev->pending_write = NULL;
     }
 
     char *kbuf = kmalloc(count + 1, GFP_KERNEL);
@@ -121,7 +125,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     memset(kbuf, 0, count + 1);
 
     if (copy_from_user(kbuf, buf, count) != 0) {
-        PDEBUG("%s(.%d), copy_from_user error", __FUNCTION__, __LINE__);
+        PDEBUG("%s(.%d), copy_from_user error\n", __FUNCTION__, __LINE__);
     }
 
     for (int i = 0; i < count; i++) {
@@ -176,6 +180,7 @@ static int aesd_setup_cdev(struct aesd_dev *dev)
 
 int aesd_init_module(void)
 {
+    PDEBUG("init function called.\n");
     dev_t dev = 0;
     int result;
     result = alloc_chrdev_region(&dev, aesd_minor, 1,
@@ -203,6 +208,7 @@ int aesd_init_module(void)
 
 void aesd_cleanup_module(void)
 {
+    PDEBUG("cleanup function called.\n");
     dev_t devno = MKDEV(aesd_major, aesd_minor);
 
     cdev_del(&aesd_device.cdev);
@@ -211,8 +217,8 @@ void aesd_cleanup_module(void)
      * TODO: cleanup AESD specific poritions here as necessary
      */
     for (int i = 0; i < AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED; i++) {
-        if (aesd_device.circular_buffer.entry->buffptr) {
-            kfree(aesd_device.circular_buffer.entry->buffptr);
+        if (aesd_device.circular_buffer.entry[i].buffptr) {
+            kfree(aesd_device.circular_buffer.entry[i].buffptr);
         }
     }
 
