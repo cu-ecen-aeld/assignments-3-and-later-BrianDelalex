@@ -11,8 +11,6 @@
  *
  */
 
-#include "aesdchar.h"
-
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/printk.h>
@@ -20,7 +18,7 @@
 #include <linux/cdev.h>
 #include <linux/slab.h>
 #include <linux/fs.h> // file_operations
-
+#include "aesdchar.h"
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 

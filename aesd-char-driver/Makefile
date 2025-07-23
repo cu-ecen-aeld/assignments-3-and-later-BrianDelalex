@@ -9,7 +9,7 @@ else
   DEBFLAGS = -O2
 endif
 
-EXTRA_CFLAGS += $(DEBFLAGS)
+EXTRA_CFLAGS += $(DEBFLAGS) -std=c11
 
 ifneq ($(KERNELRELEASE),)
 # call from kernel build system
