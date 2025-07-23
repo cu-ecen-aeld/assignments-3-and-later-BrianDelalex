@@ -25,17 +25,11 @@ MODULE_AUTHOR("BrianDelalex"); /** TODO: fill in your name **/
 MODULE_LICENSE("Dual BSD/GPL");
 
 struct aesd_dev aesd_device;
-static atomic_t aesd_s_available = ATOMIC_INIT(1);
 
 int aesd_open(struct inode *inode, struct file *filp)
 {
     PDEBUG("open");
     struct aesd_dev *dev = &aesd_device;
-
-    if (!atomic_dec_and_test(&aesd_s_available)) {
-        atomic_inc(&aesd_s_available);
-        return -EBUSY; /* Already open */
-    }
 
     filp->private_data = dev;
     /**
@@ -47,7 +41,6 @@ int aesd_open(struct inode *inode, struct file *filp)
 int aesd_release(struct inode *inode, struct file *filp)
 {
     PDEBUG("release");
-    atomic_inc(&aesd_s_available);
     /**
      * TODO: handle release
      */
@@ -60,7 +53,11 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     ssize_t retval = 0;
     struct aesd_dev *dev = (struct aesd_dev *)filp->private_data;
     size_t entry_offset = 0;
-    char *kbuf = kmalloc(count, GFP_KERNEL);
+    char *kbuf;
+
+    down_read(&dev->rw_sem);
+    
+    kbuf = kmalloc(count, GFP_KERNEL);
     PDEBUG("read %zu bytes with offset %lld",count,*f_pos);
 
     while (retval < count) {
@@ -73,6 +70,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
         if (!entry) {
             if (retval == 0) {
                 kfree(kbuf);
+                up_read(&dev->rw_sem);
                 return 0;
             }
             break;
@@ -83,6 +81,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
             retval++;
         }
     }
+    up_read(&dev->rw_sem);
     unsigned long byte_copied = copy_to_user(buf, kbuf, retval);
     kfree(kbuf);
     if (byte_copied != 0) {
@@ -103,13 +102,16 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     size_t pending_count = 0;
     char *to_write = NULL;
 
+    down_write(&dev->rw_sem);
     PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
 
     if (dev->pending_write) {
         for (; dev->pending_write[pending_count]; pending_count++);
         to_write = kmalloc(count + pending_count + 1, GFP_KERNEL);
-        if (!to_write)
+        if (!to_write) {
+            up_write(&dev->rw_sem);
             return retval;
+        }
         to_write[count + pending_count] = 0;
         memcpy(to_write, dev->pending_write, pending_count);
         kfree(dev->pending_write);
@@ -120,6 +122,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     if (!kbuf) {
         if (to_write)
             kfree(to_write);
+        up_write(&dev->rw_sem);
         return retval;
     }
     memset(kbuf, 0, count + 1);
@@ -152,6 +155,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
         PDEBUG("adding %s to pending write\n", to_write);
         dev->pending_write = to_write;
     }
+    up_write(&dev->rw_sem);
     return count;
 }
 struct file_operations aesd_fops = {
@@ -196,6 +200,7 @@ int aesd_init_module(void)
      * TODO: initialize the AESD specific portion of the device
      */
     aesd_circular_buffer_init(&aesd_device.circular_buffer);
+    init_rwsem(&aesd_device.rw_sem);
 
     result = aesd_setup_cdev(&aesd_device);
 

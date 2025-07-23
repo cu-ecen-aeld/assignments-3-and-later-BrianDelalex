@@ -33,6 +33,7 @@ struct aesd_dev
     struct cdev cdev;     /* Char device structure      */
     struct aesd_circular_buffer circular_buffer;
     char *pending_write;
+    struct rw_semaphore rw_sem;
 };
 
 
