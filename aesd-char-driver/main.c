@@ -62,24 +62,33 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     size_t entry_offset = 0;
     char *kbuf = kmalloc(count, GFP_KERNEL);
     PDEBUG("read %zu bytes with offset %lld",count,*f_pos);
-    /**
-     * TODO: handle read
-     */
-    
+
     while (retval < count) {
-        struct aesd_buffer_entry *entry = aesd_circular_buffer_find_entry_offset_for_fpos(&dev->circular_buffer, f_pos + retval, &entry_offset);
-        PDEBUG("OUTER LOOP");
+        struct aesd_buffer_entry *entry = 
+            aesd_circular_buffer_find_entry_offset_for_fpos(
+                &dev->circular_buffer,
+                *f_pos + retval,
+                &entry_offset
+            );
+        if (!entry) {
+            kfree(kbuf);
+            return 0;
+        }
         while (entry_offset < entry->size && retval < count) {
-            PDEBUG("INNER LOOP");
             kbuf[retval] = entry->buffptr[entry_offset];
             entry_offset++;
             retval++;
         }
     }
-    PDEBUG("BEFORE COPY.");
-    copy_to_user(buf, kbuf, retval);
+    retval = copy_to_user(buf, kbuf, retval);
+    kfree(kbuf);
+    if (retval != 0) {
+        PDEBUG("%s(l.%d): %ld bytes has not been copied.", __FUNCTION__, __LINE__, retval);
+        return count - retval;
+    }
+    *f_pos = *f_pos + count;
 
-    return retval;
+    return count;
 }
 
 ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
@@ -96,12 +105,19 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     if (dev->pending_write) {
         for (; dev->pending_write[pending_count]; pending_count++);
         to_write = kmalloc(count + pending_count + 1, GFP_KERNEL);
+        if (!to_write)
+            return retval;
         to_write[count + pending_count] = 0;
         memcpy(to_write, dev->pending_write, pending_count);
         kfree(dev->pending_write);
     }
 
     char *kbuf = kmalloc(count + 1, GFP_KERNEL);
+    if (!kbuf) {
+        if (to_write)
+            kfree(to_write);
+        return retval;
+    }
     memset(kbuf, 0, count + 1);
 
     if (copy_from_user(kbuf, buf, count) != 0) {
@@ -194,6 +210,11 @@ void aesd_cleanup_module(void)
     /**
      * TODO: cleanup AESD specific poritions here as necessary
      */
+    for (int i = 0; i < AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED; i++) {
+        if (aesd_device.circular_buffer.entry->buffptr) {
+            kfree(aesd_device.circular_buffer.entry->buffptr);
+        }
+    }
 
     unregister_chrdev_region(devno, 1);
 }
