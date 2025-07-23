@@ -21,14 +21,23 @@
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
-MODULE_AUTHOR("Your Name Here"); /** TODO: fill in your name **/
+MODULE_AUTHOR("BrianDelalex"); /** TODO: fill in your name **/
 MODULE_LICENSE("Dual BSD/GPL");
 
 struct aesd_dev aesd_device;
+static atomic_t aesd_s_available = ATOMIC_INIT(1);
 
 int aesd_open(struct inode *inode, struct file *filp)
 {
     PDEBUG("open");
+    struct aesd_dev *dev = &aesd_device;
+
+    if (!atomic_dec_and_test(&aesd_s_available)) {
+        atomic_inc(&aesd_s_available);
+        return -EBUSY; /* Already open */
+    }
+
+    filp->private_data = dev;
     /**
      * TODO: handle open
      */
@@ -38,6 +47,7 @@ int aesd_open(struct inode *inode, struct file *filp)
 int aesd_release(struct inode *inode, struct file *filp)
 {
     PDEBUG("release");
+    atomic_inc(&aesd_s_available);
     /**
      * TODO: handle release
      */
@@ -48,22 +58,81 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
                 loff_t *f_pos)
 {
     ssize_t retval = 0;
+    struct aesd_dev *dev = (struct aesd_dev *)filp->private_data;
+    size_t entry_offset = 0;
+    char *kbuf = kmalloc(count, GFP_KERNEL);
     PDEBUG("read %zu bytes with offset %lld",count,*f_pos);
     /**
      * TODO: handle read
      */
+    
+    while (retval < count) {
+        struct aesd_buffer_entry *entry = aesd_circular_buffer_find_entry_offset_for_fpos(&dev->circular_buffer, f_pos + retval, &entry_offset);
+        PDEBUG("OUTER LOOP");
+        while (entry_offset < entry->size && retval < count) {
+            PDEBUG("INNER LOOP");
+            kbuf[retval] = entry->buffptr[entry_offset];
+            entry_offset++;
+            retval++;
+        }
+    }
+    PDEBUG("BEFORE COPY.");
+    copy_to_user(buf, kbuf, retval);
+
     return retval;
 }
 
 ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
                 loff_t *f_pos)
 {
+    bool cmd_complete = 0;
     ssize_t retval = -ENOMEM;
+    struct aesd_dev *dev = (struct aesd_dev *) filp->private_data;
+    size_t pending_count = 0;
+    char *to_write = NULL;
+
     PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
-    /**
-     * TODO: handle write
-     */
-    return retval;
+
+    if (dev->pending_write) {
+        for (; dev->pending_write[pending_count]; pending_count++);
+        to_write = kmalloc(count + pending_count + 1, GFP_KERNEL);
+        to_write[count + pending_count] = 0;
+        memcpy(to_write, dev->pending_write, pending_count);
+        kfree(dev->pending_write);
+    }
+
+    char *kbuf = kmalloc(count + 1, GFP_KERNEL);
+    memset(kbuf, 0, count + 1);
+
+    if (copy_from_user(kbuf, buf, count) != 0) {
+        PDEBUG("%s(.%d), copy_from_user error", __FUNCTION__, __LINE__);
+    }
+
+    for (int i = 0; i < count; i++) {
+        if (kbuf[i] == '\n') {
+            cmd_complete = 1;
+            break;
+        }
+    }
+
+    if (!to_write) {
+        to_write = kbuf;
+    } else {
+        memcpy(&(to_write[pending_count]), kbuf, count);
+        kfree(kbuf);
+    }
+
+    if (cmd_complete) {
+        struct aesd_buffer_entry entry;
+        entry.buffptr = to_write;
+        entry.size = count + pending_count;
+        PDEBUG("adding %s to circular buffer\n", entry.buffptr);
+        aesd_circular_buffer_add_entry(&dev->circular_buffer, &entry);
+    } else {
+        PDEBUG("adding %s to pending write\n", to_write);
+        dev->pending_write = to_write;
+    }
+    return count;
 }
 struct file_operations aesd_fops = {
     .owner =    THIS_MODULE,
@@ -105,6 +174,7 @@ int aesd_init_module(void)
     /**
      * TODO: initialize the AESD specific portion of the device
      */
+    aesd_circular_buffer_init(&aesd_device.circular_buffer);
 
     result = aesd_setup_cdev(&aesd_device);
 
