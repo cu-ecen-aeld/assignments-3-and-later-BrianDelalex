@@ -158,8 +158,14 @@ void *connection_routine(void *threadData)
         goto free_data;
     }
     pthread_mutex_unlock(&fd_mutex);
+    close(fd);
     free(data);
 
+    fd = open_file();
+    if (fd == -1) {
+        printf("%s: %s", __FUNCTION__, strerror(errno));
+        return NULL;
+    }
     fileData = read_file(fd);
     if (!fileData) {
         printf("%s: error in read_file().\n", __FUNCTION__);
