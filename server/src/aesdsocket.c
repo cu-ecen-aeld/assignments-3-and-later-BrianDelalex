@@ -195,6 +195,12 @@ void *connection_routine(void *threadData)
     }
     if (strstr(data, "AESDCHAR_IOCSEEKTO") != NULL) {
         ioctl_call(fd, data);
+        fileData = read_file(fd);
+        if (!fileData) {
+            printf("%s: error in read_file().\n", __FUNCTION__);
+            goto free_data;
+        }
+        close(fd);
     } else {
         pthread_mutex_lock(&fd_mutex);
         if (write(fd, data, strlen(data)) == -1) {
@@ -202,16 +208,15 @@ void *connection_routine(void *threadData)
             printf("%s: %s", __FUNCTION__, strerror(errno));
             goto free_data;
         }
+        fileData = read_file(fd);
+        if (!fileData) {
+            printf("%s: error in read_file().\n", __FUNCTION__);
+            goto free_data;
+        }
+        close(fd);
         pthread_mutex_unlock(&fd_mutex);
     }
     free(data);
-
-    fileData = read_file(fd);
-    if (!fileData) {
-        printf("%s: error in read_file().\n", __FUNCTION__);
-        goto free_data;
-    }
-    close(fd);
 
     if (send(threadInfo->client_fd, fileData, strlen(fileData), 0) == -1) {
         printf("%s: %s", __FUNCTION__, strerror(errno));
