@@ -19,6 +19,7 @@
 #include <linux/slab.h>
 #include <linux/fs.h> // file_operations
 #include "aesdchar.h"
+#include "aesd_ioctl.h"
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
@@ -164,12 +165,143 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     return count;
 }
 
+loff_t aesd_lseek_set(struct file *filp, loff_t offset)
+{
+    loff_t retval = (loff_t)-EINVAL;
+    struct aesd_dev *dev = (struct aesd_dev *)filp->private_data;
+    size_t entry_offset;
+
+    down_read(&dev->rw_sem);
+
+    struct aesd_buffer_entry *entry =
+        aesd_circular_buffer_find_entry_offset_for_fpos(
+            &dev->circular_buffer, offset, &entry_offset);
+    if (!entry) {
+        goto ret;
+    }
+    retval = offset;
+    filp->f_pos = retval;
+ret:
+    up_read(&dev->rw_sem);
+    return retval;
+}
+
+loff_t aesd_lseek_cur(struct file *filp, loff_t offset)
+{
+    loff_t retval = (loff_t)-EINVAL;
+    struct aesd_dev *dev = (struct aesd_dev *)filp->private_data;
+    size_t entry_offset;
+
+    down_read(&dev->rw_sem);
+
+    struct aesd_buffer_entry *entry = 
+        aesd_circular_buffer_find_entry_offset_for_fpos(
+            &dev->circular_buffer, filp->f_pos + offset, &entry_offset);
+    if (!entry) {
+        goto ret;
+    }
+    retval = filp->f_pos + offset;
+    filp->f_pos = retval;
+ret:
+    up_read(&dev->rw_sem);
+    return retval;
+}
+
+loff_t aesd_lseek_end(struct file *filp, loff_t offset)
+{
+    loff_t retval = (loff_t)-EINVAL;
+    struct aesd_dev *dev = (struct aesd_dev *)filp->private_data;
+    size_t offset_counter = 0;
+    struct aesd_buffer_entry *entry = NULL;
+    size_t entry_offset;
+
+    // Don't allow to seek after end.
+    if (offset > 0) {
+        return retval;
+    }
+
+    down_read(&dev->rw_sem);
+
+    do {
+        entry = aesd_circular_buffer_find_entry_offset_for_fpos(&dev->circular_buffer, offset_counter, &entry_offset);
+        offset_counter++;
+    } while (entry);
+    retval = offset_counter - 1;
+    filp->f_pos = retval;
+
+    
+    up_read(&dev->rw_sem);
+    return retval;
+}
+
+loff_t aesd_lseek(struct file *filp, loff_t offset, int whence)
+{
+    switch (whence) {
+        case SEEK_SET:
+            return aesd_lseek_set(filp, offset);
+            break;
+        case SEEK_CUR:
+            return aesd_lseek_cur(filp, offset);
+            break;
+        case SEEK_END:
+            return aesd_lseek_end(filp, offset);
+            break;
+        default:
+            PDEBUG("Unknow whence %d", whence);
+            return (loff_t)-EINVAL;
+    }
+}
+
+long aesd_ioctl_seekto(struct file *filp, unsigned long arg)
+{
+    struct aesd_dev *dev = (struct aesd_dev *)filp->private_data;
+    struct aesd_seekto args;
+    size_t fpos;
+    long retval;
+
+    retval = copy_from_user(&args, (void*) arg, sizeof(args));
+    if (retval == -EINVAL) {
+        PDEBUG("__get_user failed\n");
+        return retval;
+    }
+    PDEBUG("ioctl args are %d and %d", args.write_cmd, args.write_cmd_offset);
+    down_read(&dev->rw_sem);
+
+    struct aesd_buffer_entry *entry = aesd_circular_buffer_find_fpos_for_entry_offset(&dev->circular_buffer, args.write_cmd, &fpos);
+    if (!entry || args.write_cmd_offset >= entry->size) {
+        retval = -EINVAL;
+        goto ret;
+    }
+    retval = fpos + args.write_cmd_offset;
+    PDEBUG("new f_pos set to %d", retval);
+    filp->f_pos = retval;
+
+ret:
+    up_read(&dev->rw_sem);
+    return retval;
+}
+
+long aesd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+    long retval = -EINVAL;
+
+    switch (cmd) {
+        case AESDCHAR_IOCSEEKTO:
+            return aesd_ioctl_seekto(filp, arg);
+            break;
+        default:
+            return retval;
+    }
+}
+
 struct file_operations aesd_fops = {
     .owner =    THIS_MODULE,
     .read =     aesd_read,
     .write =    aesd_write,
     .open =     aesd_open,
     .release =  aesd_release,
+    .llseek =   aesd_lseek,
+    .unlocked_ioctl = aesd_ioctl,
 };
 
 static int aesd_setup_cdev(struct aesd_dev *dev)

@@ -1,4 +1,5 @@
 # include <sys/socket.h>
+# include <sys/ioctl.h>
 # include <netdb.h>
 # include <stdio.h>
 # include <stdlib.h>
@@ -21,6 +22,17 @@
 int server = -1;
 pthread_mutex_t fd_mutex;
 head_t head;
+
+struct aesd_seekto {
+    /**
+     * The zero referenced write command to seek into
+     */
+    uint32_t write_cmd;
+    /**
+     * The zero referenced offset within the write
+     */
+    uint32_t write_cmd_offset;
+};
 
 void signal_handler(int sig)
 {
@@ -125,6 +137,37 @@ void *timestamp_routine(void *threadData)
     }
 }
 
+void ioctl_call(int fd, char *data)
+{
+    char x_str[10];
+    char y_str[10];
+    struct aesd_seekto args;
+    int i = 0;
+
+    memset(x_str, 0, 10);
+    memset(y_str, 0, 10);
+    printf("%s: data = %s", __FUNCTION__, data);
+    for (; data[i] && data[i] != ':'; i++);
+    i++;
+    for (int j = 0; data[i] && data[i] != ','; i++, j++) {
+        x_str[j] = data[i];
+    }
+    printf("%s: x_str = %s", __FUNCTION__, x_str);
+    i++;
+    for (int j = 0; data[i]; i++, j++) {
+        y_str[j] = data[i];
+    }
+    printf("%s: y_str = %s", __FUNCTION__, y_str);
+    args.write_cmd = atoi(x_str);
+    args.write_cmd_offset = atoi(y_str);
+
+
+    int rc = ioctl(fd, _IOWR(0x16, 1, struct aesd_seekto), &args);
+    if (rc == -1) {
+        printf("Error in ioctl code: %d. %s\n", errno, strerror(errno));
+    }
+}
+
 void *connection_routine(void *threadData)
 {
     struct sigaction action;
@@ -150,22 +193,19 @@ void *connection_routine(void *threadData)
         printf("%s: %s", __FUNCTION__, strerror(errno));
         return NULL;
     }
-
-    pthread_mutex_lock(&fd_mutex);
-    if (write(fd, data, strlen(data)) == -1) {
+    if (strstr(data, "AESDCHAR_IOCSEEKTO") != NULL) {
+        ioctl_call(fd, data);
+    } else {
+        pthread_mutex_lock(&fd_mutex);
+        if (write(fd, data, strlen(data)) == -1) {
+            pthread_mutex_unlock(&fd_mutex);
+            printf("%s: %s", __FUNCTION__, strerror(errno));
+            goto free_data;
+        }
         pthread_mutex_unlock(&fd_mutex);
-        printf("%s: %s", __FUNCTION__, strerror(errno));
-        goto free_data;
     }
-    pthread_mutex_unlock(&fd_mutex);
-    close(fd);
     free(data);
 
-    fd = open_file();
-    if (fd == -1) {
-        printf("%s: %s", __FUNCTION__, strerror(errno));
-        return NULL;
-    }
     fileData = read_file(fd);
     if (!fileData) {
         printf("%s: error in read_file().\n", __FUNCTION__);
